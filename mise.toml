@@ -1,0 +1,13 @@
+# `mise run check` is what pre-push runs, `mise run format` what pre-commit runs.
+[tools]
+node = "26.7.0"
+shellcheck = "0.11.0"
+jq = "1.8.1"
+
+[tasks.check]
+description = "Everything pre-push runs: shellcheck, JSON, JS syntax, node tests, Omarchy manifest check where Omarchy is installed"
+run = "scripts/check.sh"
+
+[tasks.format]
+description = "Format the files given (pre-commit passes the staged ones and restages them)"
+run = "true"

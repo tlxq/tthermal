@@ -1,0 +1,13 @@
+#!/bin/bash
+# Tell the root helper what to do:
+#   tthermal-control <enabled 0|1> <max-temp-C> [fan-cap 1-7] [burst 0|1]
+# Called by the plugin every 20 s as a heartbeat; the helper lets go of the
+# power limits when the heartbeat stops.
+set -euo pipefail
+
+dir=/var/lib/tthermal
+[[ -w $dir ]] || exit 0
+[[ ${1:-} =~ ^[01]$ && ${2:-} =~ ^[0-9]+$ && ${3:-7} =~ ^[1-7]$ && ${4:-1} =~ ^[01]$ ]] || { echo "usage: tthermal-control 0|1 <max-temp-C> [fan-cap 1-7] [burst 0|1]" >&2; exit 1; }
+
+printf 'enabled=%s\nmax=%s\nfan_cap=%s\nburst=%s\nheartbeat=%s\n' "$1" "$2" "${3:-7}" "${4:-1}" "$EPOCHSECONDS" >"$dir/control.tmp"
+mv -f "$dir/control.tmp" "$dir/control"

@@ -1,0 +1,73 @@
+#!/bin/bash
+# Check that tthermal can work on this machine and that nothing fights it.
+# Read-only; prints one line per check and exits non-zero on any problem.
+set -uo pipefail
+
+bin=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+repo=$(dirname "$bin")
+problems=0
+ok() { printf '  ok    %s\n' "$*"; }
+warn() { printf '  WARN  %s\n' "$*"; problems=$((problems + 1)); }
+info() { printf '  --    %s\n' "$*"; }
+
+echo "Hardware"
+grep -q GenuineIntel /proc/cpuinfo && ok "Intel CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)" || warn "not an Intel CPU — the power-limit guard needs Intel RAPL"
+[[ -d /sys/class/powercap/intel-rapl-mmio:0 ]] && ok "RAPL MMIO power limits" || warn "no RAPL MMIO power limits (/sys/class/powercap/intel-rapl-mmio:0)"
+grep -qx x86_pkg_temp /sys/class/thermal/thermal_zone*/type 2>/dev/null && ok "CPU package temperature sensor" || warn "no x86_pkg_temp sensor"
+if [[ -r /proc/acpi/ibm/fan ]]; then
+  ok "ThinkPad fan readout"
+  if [[ $(</sys/module/thinkpad_acpi/parameters/fan_control) == Y ]]; then
+    ok "fan control enabled (level $(grep -m1 '^fan_level=' /run/tthermal/status 2>/dev/null | cut -d= -f2))"
+  elif [[ -e /etc/modprobe.d/tthermal.conf ]]; then
+    warn "fan control set up but not active yet — reboot once"
+  else
+    warn "fan control off (sudo $repo/helper/install.sh, then reboot)"
+  fi
+else
+  info "no ThinkPad fan readout (fan tile shows off)"
+fi
+compgen -G '/proc/acpi/button/lid/*/state' >/dev/null && ok "lid sensor" || info "no lid sensor (desktop?)"
+
+echo "Plugin"
+link=$HOME/.config/omarchy/plugins/com.ttdevs.tthermal
+[[ -e $link ]] && ok "linked: $link -> $(readlink -f "$link")" || warn "not linked into ~/.config/omarchy/plugins"
+state=$(OMARCHY_SHELL_IPC_TIMEOUT=10s omarchy plugin list 2>/dev/null | awk '$1=="com.ttdevs.tthermal"{print $2}')
+[[ $state == enabled ]] && ok "enabled in the bar" || warn "plugin state: ${state:-unknown} (omarchy plugin enable com.ttdevs.tthermal)"
+
+echo "Root helper"
+if systemctl is-active -q tthermal; then
+  ok "tthermal.service running"
+  cmp -s "$repo/helper/tthermald" /usr/local/lib/tthermal/tthermald && ok "installed helper matches the repo" || warn "installed helper is older than the repo (sudo $repo/helper/install.sh)"
+  now=$(date +%s)
+  updated=$(grep -m1 '^updated=' /run/tthermal/status 2>/dev/null | cut -d= -f2)
+  (( now - ${updated:-0} < 10 )) && ok "status fresh: $(grep -E '^(state|temp|max)=' /run/tthermal/status | paste -sd' ')" || warn "no fresh /run/tthermal/status"
+  heartbeat=$(grep -m1 '^heartbeat=' /var/lib/tthermal/control 2>/dev/null | cut -d= -f2)
+  (( now - ${heartbeat:-0} < 60 )) && ok "plugin heartbeat $(( now - heartbeat )) s ago" || info "no recent plugin heartbeat (guard released)"
+else
+  warn "tthermal.service not running (Enable temperature control in the panel, or sudo $repo/helper/install.sh)"
+fi
+
+echo "Conflicts"
+systemctl is-active -q power-profiles-daemon && ok "power-profiles-daemon running" || warn "power-profiles-daemon not running"
+for unit in tlp auto-cpufreq thinkfan tuned; do
+  systemctl is-active -q "$unit" 2>/dev/null && warn "$unit is running and may fight tthermal"
+done
+if [[ -r /etc/thermald/thermal-conf.xml ]] && grep -q rapl_controller /etc/thermald/thermal-conf.xml; then
+  warn "custom thermald rule in /etc/thermald/thermal-conf.xml also steers RAPL power limits"
+else
+  ok "no custom thermald power-limit rule"
+fi
+saved=$(cat "${XDG_STATE_HOME:-$HOME/.local/state}"/omarchy/powerprofiles/{ac,battery} 2>/dev/null | sort -u | paste -sd,)
+active=$(busctl get-property net.hadess.PowerProfiles /net/hadess/PowerProfiles net.hadess.PowerProfiles ActiveProfile 2>/dev/null | awk '{gsub(/"/,"",$2); print $2}')
+[[ $saved == "$active" ]] && ok "Omarchy's saved profile follows tthermal ($active)" || info "Omarchy saved profile ($saved) differs from active ($active) — fine if tthermal is off"
+
+echo "Battery care"
+case $("$bin/tthermal-battery-care" get) in
+  on) ok "charge limit on" ;;
+  off) info "charge limit off (turn on in the panel)" ;;
+  *) info "charge limit not supported on this battery" ;;
+esac
+
+echo
+(( problems == 0 )) && echo "All good." || echo "$problems problem(s) found."
+exit $(( problems > 0 ))

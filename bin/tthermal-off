@@ -1,0 +1,13 @@
+#!/bin/bash
+# Turn tthermal off: release the power limits, give Omarchy back its saved
+# power-profile choice, and switch the bar back to Omarchy's battery icon.
+# Battery care is left as it is. `omarchy plugin enable com.ttdevs.tthermal`
+# turns tthermal on again.
+set -uo pipefail
+
+bin=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+max=$(grep -m1 '^max=' /var/lib/tthermal/control 2>/dev/null | cut -d= -f2)
+
+"$bin/tthermal-control" 0 "${max:-80}" || true
+"$bin/tthermal-profile" restore || true
+OMARCHY_SHELL_IPC_TIMEOUT=15s omarchy plugin disable com.ttdevs.tthermal

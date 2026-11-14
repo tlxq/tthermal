@@ -1,0 +1,206 @@
+#!/bin/bash
+# tthermal-desk — desk side of tthermal. CoolerControl runs the fan curves; this service
+# only picks which set of curves is active and tells the panel what's going on.
+#
+#   auto     the normal curves (cooler + rear follow the CPU, top + intake the hotter of CPU/GPU)
+#   gaming   GPU over 50 % busy for 30 s: case fans get a floor (top 45 %, intake 55 %);
+#            back to auto after 2 min below 50 %
+#   full     every managed fan at 100 %, back to auto after 30 min (or when asked)
+#
+# Usage   tthermal-desk run            the service loop (tthermal-desk.service)
+#         tthermal-desk full | auto    ask the running service to switch (the panel buttons)
+#
+# Input   ~/.config/ttdevs/coolercontrol.token   CoolerControl API token with write access
+#         $XDG_RUNTIME_DIR/tthermal/request      one word written by `full` / `auto`
+# Output  $XDG_RUNTIME_DIR/tthermal/status       key=value snapshot for the panel (and any other reader), every 2 s;
+#                                                gpu_fan in %, the fans in rpm, week_* from `tthermal-week summary` every 10 min
+#         journal                                state changes and fan alerts
+#
+# Temperatures and rpm are read straight from hwmon and nvidia-smi. The profiles it switches
+# between (tt-cooler, tt-case, tt-intake, tt-game-top, tt-game-intake, tt-full) are made in
+# CoolerControl beforehand: see README.md, Desk version. On stop it puts the auto curves back; if CoolerControl itself stops, the BIOS takes the fans (pwm_enable=2).
+set -uo pipefail
+
+run_dir=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/tthermal
+status=$run_dir/status
+request=$run_dir/request
+token_file=$HOME/.config/ttdevs/coolercontrol.token
+api_url=https://127.0.0.1:11987
+cc_device=it8688   # the CoolerControl device that drives the fan headers, by name
+cc_uid=""          # its id, looked up from the API once it answers
+
+interval_s=2
+gaming_util=50
+gaming_after_s=30
+gaming_until_s=120
+full_for_s=1800
+fan_dead_after_s=60
+week_every_s=600
+week_bin=$(dirname "$(readlink -f "$0")")/tthermal-week
+# Fan names as the panel shows them: hwmon channel -> name (fan4 is the chipset fan, left to the BIOS).
+fans=(fan1 fan5 fan2 fan3)
+declare -A fan_name=([fan1]=Cooler [fan5]=Rear [fan2]=Top [fan3]=Intake)
+
+case ${1:-} in
+	full | auto)
+		mkdir -p "$run_dir"
+		echo "$1" >"$request"
+		exit 0
+		;;
+	run) ;;
+	*) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
+
+hwmon_dir() {
+	local d
+	for d in /sys/class/hwmon/hwmon*; do [[ $(<"$d/name") == "$1" ]] && { echo "$d"; return; }; done
+}
+it=$(hwmon_dir it8688)
+zen=$(hwmon_dir zenpower)
+[[ -n $it && -n $zen ]] || { echo "tthermal-desk: it8688 or zenpower sensor not found" >&2; exit 1; }
+
+# CoolerControl's id for $cc_device; 0 when found.
+find_device() {
+	cc_uid=$(curl -sk -m 5 -f -H "Authorization: Bearer $(<"$token_file")" "$api_url/devices" |
+		jq -r --arg n "$cc_device" 'first(.devices[] | select(.name == $n) | .uid) // empty' 2>/dev/null)
+	[[ -n $cc_uid ]]
+}
+
+# PUT one channel's profile; 0 on success.
+set_profile() {
+	[[ -n $cc_uid ]] || find_device || return 1
+	curl -sk -m 5 -f -o /dev/null -X PUT -H "Authorization: Bearer $(<"$token_file")" -H 'Content-Type: application/json' \
+		"$api_url/devices/$cc_uid/settings/$1/profile" -d "{\"profile_uid\":\"$2\"}"
+}
+
+apply_state() {
+	local ok=0
+	case $1 in
+		auto) set_profile fan1 tt-cooler && set_profile fan5 tt-cooler && set_profile fan2 tt-case && set_profile fan3 tt-intake || ok=1 ;;
+		gaming) set_profile fan1 tt-cooler && set_profile fan5 tt-cooler && set_profile fan2 tt-game-top && set_profile fan3 tt-game-intake || ok=1 ;;
+		full) set_profile fan1 tt-full && set_profile fan5 tt-full && set_profile fan2 tt-full && set_profile fan3 tt-full || ok=1 ;;
+	esac
+	return $ok
+}
+
+state=auto
+applied=""
+full_until=0
+busy_since=0
+calm_since=0
+week_at=0
+week=""
+declare -A zero_since=() alerted=()
+
+cleanup() {
+	apply_state auto && echo "stopped, auto curves back"
+	rm -f "$status"
+	exit 0
+}
+trap cleanup TERM INT
+
+mkdir -p "$run_dir"
+rm -f "$request"
+echo "started"
+
+while :; do
+	now=$(date +%s)
+
+	cpu=$(($(<"$zen/temp1_input") / 1000))
+	IFS=', ' read -r gpu gpu_util gpu_fan < <(nvidia-smi --query-gpu=temperature.gpu,utilization.gpu,fan.speed --format=csv,noheader,nounits 2>/dev/null) || true
+	gpu=${gpu:-0} gpu_util=${gpu_util:-0}
+	[[ $gpu =~ ^[0-9]+$ ]] || gpu=0
+	[[ $gpu_util =~ ^[0-9]+$ ]] || gpu_util=0
+	[[ ${gpu_fan:-} =~ ^[0-9]+$ ]] || gpu_fan=""   # empty, not 0, when the driver doesn't say
+	if ((gpu > cpu)); then hot=$gpu hot_src=GPU; else hot=$cpu hot_src=CPU; fi
+	# 1 = CoolerControl drives the header, 2 = BIOS auto (daemon stopped or never applied).
+	control=bios
+	[[ $(<"$it/pwm1_enable") == 1 ]] && control=cc
+
+	# Requests from the panel
+	if [[ -s $request ]]; then
+		want=$(<"$request")
+		rm -f "$request"
+		case $want in
+			full) state=full; full_until=$((now + full_for_s)); echo "full speed (back to auto in $((full_for_s / 60)) min)" ;;
+			auto) [[ $state != auto ]] && echo "auto (asked)"; state=auto; full_until=0 ;;
+		esac
+	fi
+
+	# GPU busy -> gaming, with hysteresis
+	if ((gpu_util >= gaming_util)); then
+		((busy_since == 0)) && busy_since=$now
+		calm_since=0
+	else
+		((calm_since == 0)) && calm_since=$now
+		busy_since=0
+	fi
+	if [[ $state == full ]] && ((now >= full_until)); then
+		state=auto
+		echo "full speed ended after $((full_for_s / 60)) min"
+	fi
+	if [[ $state == auto ]] && ((busy_since > 0 && now - busy_since >= gaming_after_s)); then
+		state=gaming
+		echo "gaming: GPU ${gpu_util} % busy for ${gaming_after_s} s"
+	elif [[ $state == gaming ]] && ((calm_since > 0 && now - calm_since >= gaming_until_s)); then
+		state=auto
+		echo "gaming over"
+	fi
+
+	# Apply when the state changed, or retry until CoolerControl accepts it.
+	if [[ $state != "$applied" && $control == cc && -r $token_file ]]; then
+		if apply_state "$state"; then applied=$state; else echo "couldn't reach CoolerControl, will retry"; fi
+	fi
+	# CoolerControl restarted or stopped: apply again once it's back.
+	[[ $control == bios ]] && applied=""
+
+	# Fans at 0 rpm for a minute
+	alert=""
+	declare -A rpm=()
+	for f in "${fans[@]}"; do
+		rpm[$f]=$(<"$it/${f}_input")
+		if ((rpm[$f] == 0)); then
+			[[ -z ${zero_since[$f]:-} ]] && zero_since[$f]=$now
+			if ((now - zero_since[$f] >= fan_dead_after_s)); then
+				alert+=${alert:+,}${fan_name[$f]}
+				if [[ -z ${alerted[$f]:-} ]]; then
+					alerted[$f]=1
+					echo "ALERT ${fan_name[$f]} fan ($f) at 0 rpm for ${fan_dead_after_s} s"
+					notify-send -u critical -a tthermal "${fan_name[$f]} fan stopped" \
+						"It has read 0 rpm for a minute. Check the fan and its hub plug." 2>/dev/null || true
+				fi
+			fi
+		else
+			[[ -n ${alerted[$f]:-} ]] && echo "${fan_name[$f]} fan ($f) spinning again"
+			unset "zero_since[$f]" "alerted[$f]"
+		fi
+	done
+
+	# The week in four numbers for the status file (cheap, but no need every 2 s)
+	if ((now - week_at >= week_every_s)); then
+		week=$("$week_bin" summary 2>/dev/null) || week=""
+		week_at=$now
+	fi
+
+	full_left=0
+	[[ $state == full ]] && full_left=$((full_until - now))
+	tmp=$status.tmp
+	{
+		echo "updated=$now"
+		echo "cpu=$cpu"
+		echo "gpu=$gpu"
+		echo "gpu_util=$gpu_util"
+		echo "gpu_fan=$gpu_fan"
+		echo "hot=$hot"
+		echo "hot_src=$hot_src"
+		echo "state=$state"
+		echo "full_left=$full_left"
+		echo "control=$control"
+		echo "alert=$alert"
+		for f in "${fans[@]}"; do echo "${fan_name[$f],,}=${rpm[$f]}"; done
+		if [[ -n $week ]]; then echo "$week"; fi
+	} >"$tmp" && mv "$tmp" "$status"
+
+	sleep "$interval_s" &
+	wait $!
+done

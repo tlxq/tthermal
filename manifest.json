@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "com.ttdevs.tthermal",
+  "name": "tthermal",
+  "version": "0.1.0",
+  "author": "Tom Larsson",
+  "license": "MIT",
+  "description": "Replaces the Omarchy battery icon. Keeps the laptop quiet and cool when idle, snappy when you work, and never above the max temperature you pick. Includes battery care (charge limit).",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "tthermal",
+    "description": "Battery, temperature guard, and battery care",
+    "category": "System",
+    "allowMultiple": false
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.power"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "com.ttdevs.tthermal",
+  "name": "tthermal",
+  "version": "0.2.1",
+  "author": "Tom Larsson",
+  "license": "MIT",
+  "description": "Desk version: shows the hotter of CPU and GPU in the bar, the fans in the panel, and switches CoolerControl between Auto, Gaming and Full speed.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "tthermal",
+    "description": "Desk temperature and fans",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

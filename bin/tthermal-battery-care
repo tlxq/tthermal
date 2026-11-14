@@ -1,0 +1,25 @@
+#!/bin/bash
+# Battery care through UPower's built-in charge limit (stop at 80 %, resume
+# below 75 % on ThinkPads). The logged-in user may switch it without a password.
+#   tthermal-battery-care get   -> "on", "off" or "unsupported"
+#   tthermal-battery-care on|off
+set -euo pipefail
+
+dev=$(upower -e | grep -m1 '/battery_' || true)
+iface=org.freedesktop.UPower.Device
+supported() { [[ -n $dev ]] && [[ $(busctl get-property org.freedesktop.UPower "$dev" $iface ChargeThresholdSupported 2>/dev/null) == "b true" ]]; }
+
+case ${1:-} in
+  get)
+    supported || { echo unsupported; exit 0; }
+    [[ $(busctl get-property org.freedesktop.UPower "$dev" $iface ChargeThresholdEnabled) == "b true" ]] && echo on || echo off
+    ;;
+  on | off)
+    supported || { echo unsupported; exit 1; }
+    busctl call org.freedesktop.UPower "$dev" $iface EnableChargeThreshold b "$([[ $1 == on ]] && echo true || echo false)"
+    ;;
+  *)
+    echo "usage: tthermal-battery-care get|on|off" >&2
+    exit 1
+    ;;
+esac

@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 700" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+  <rect width="1280" height="700" rx="16" fill="#24252a"/>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#8fb0ff"/></marker></defs>
+
+  <g fill="#f2f0ea" fill-opacity=".55" font-size="18" font-weight="600" letter-spacing="2">
+    <text x="60" y="62">LAPTOP (repo root)</text>
+    <text x="60" y="412">DESKTOP (desk/)</text>
+  </g>
+  <line x1="60" y1="370" x2="1220" y2="370" stroke="#f2f0ea" stroke-opacity=".15" stroke-width="2"/>
+
+  <g fill="none" stroke="#f2f0ea" stroke-opacity=".35" stroke-width="2">
+    <rect x="60" y="90" width="300" height="140" rx="12" stroke="#8fb0ff" stroke-opacity=".8"/>
+    <rect x="490" y="90" width="300" height="140" rx="12"/>
+    <rect x="920" y="90" width="300" height="140" rx="12"/>
+    <rect x="60" y="260" width="300" height="80" rx="12"/>
+    <rect x="60" y="440" width="300" height="140" rx="12" stroke="#8fb0ff" stroke-opacity=".8"/>
+    <rect x="490" y="440" width="300" height="140" rx="12"/>
+    <rect x="920" y="440" width="300" height="140" rx="12"/>
+    <rect x="490" y="610" width="300" height="70" rx="12"/>
+  </g>
+
+  <g fill="#f2f0ea" font-size="26" font-weight="600">
+    <text x="84" y="134" fill="#8fb0ff">Bar plugin</text>
+    <text x="514" y="134">tthermald</text>
+    <text x="944" y="134">Intel CPU</text>
+    <text x="84" y="484" fill="#8fb0ff">Bar plugin</text>
+    <text x="514" y="484">tthermal-desk</text>
+    <text x="944" y="484">CoolerControl</text>
+  </g>
+  <g fill="#f2f0ea" fill-opacity=".7" font-size="19">
+    <text x="84" y="166">QML in the Omarchy shell</text>
+    <text x="84" y="192">Auto, max temperature,</text>
+    <text x="84" y="216">battery care</text>
+    <text x="514" y="166">root service, every 0.5 s</text>
+    <text x="514" y="192">keeps the CPU under</text>
+    <text x="514" y="216">your max</text>
+    <text x="944" y="166">RAPL power limits</text>
+    <text x="944" y="192">PL1 and PL2</text>
+    <text x="944" y="216">ThinkPad fan level</text>
+    <text x="84" y="296">power profile, UPower</text>
+    <text x="84" y="322">charge limit</text>
+    <text x="84" y="516">CPU and GPU, the fans,</text>
+    <text x="84" y="542">a week chart,</text>
+    <text x="84" y="566">Auto or Full speed</text>
+    <text x="514" y="516">user service, every 2 s</text>
+    <text x="514" y="542">picks Auto, Gaming</text>
+    <text x="514" y="566">or Full speed</text>
+    <text x="944" y="516">runs the fan curves</text>
+    <text x="944" y="542">your own profiles</text>
+    <text x="944" y="566">BIOS takes over if it stops</text>
+    <text x="514" y="652">hwmon, nvidia-smi</text>
+  </g>
+
+  <g fill="none" stroke="#8fb0ff" stroke-width="2.5" marker-end="url(#a)">
+    <path d="M360 140H486"/>
+    <path d="M490 190H364"/>
+    <path d="M790 160H916"/>
+    <path d="M210 230V256"/>
+    <path d="M360 490H486"/>
+    <path d="M490 550H364"/>
+    <path d="M790 510H916"/>
+    <path d="M640 610V584"/>
+  </g>
+  <g fill="#8fb0ff" font-size="16">
+    <text x="372" y="130">max, heartbeat</text>
+    <text x="392" y="212">status</text>
+    <text x="802" y="150">sets</text>
+    <text x="372" y="480">Full speed</text>
+    <text x="392" y="572">status</text>
+    <text x="802" y="500">API</text>
+  </g>
+</svg>

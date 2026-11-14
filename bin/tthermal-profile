@@ -1,0 +1,32 @@
+#!/bin/bash
+# Set the power profile and mirror it into Omarchy's saved AC/battery choice, so
+# Omarchy's own plug-in switcher re-applies the same profile instead of fighting
+# it. The first call keeps a copy of Omarchy's choice; `restore` puts it back.
+set -euo pipefail
+
+state=${XDG_STATE_HOME:-$HOME/.local/state}
+omarchy_dir=$state/omarchy/powerprofiles
+backup_dir=$state/tthermal/omarchy-powerprofiles
+
+case ${1:-} in
+  power-saver | balanced | performance)
+    if [[ ! -d $backup_dir ]]; then
+      mkdir -p "$backup_dir"
+      cp -a "$omarchy_dir/." "$backup_dir/" 2>/dev/null || true
+    fi
+    mkdir -p "$omarchy_dir"
+    printf '%s\n' "$1" >"$omarchy_dir/ac"
+    printf '%s\n' "$1" >"$omarchy_dir/battery"
+    busctl set-property net.hadess.PowerProfiles /net/hadess/PowerProfiles net.hadess.PowerProfiles ActiveProfile s "$1"
+    ;;
+  restore)
+    [[ -d $backup_dir ]] || exit 0
+    cp -a "$backup_dir/." "$omarchy_dir/"
+    rm -rf "$backup_dir"
+    exec omarchy-powerprofiles-set autodetect
+    ;;
+  *)
+    echo "usage: tthermal-profile power-saver|balanced|performance|restore" >&2
+    exit 1
+    ;;
+esac

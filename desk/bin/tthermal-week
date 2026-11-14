@@ -1,0 +1,59 @@
+#!/bin/bash
+# tthermal-week — the panel's week chart data, from the desk-fanlog CSVs (~/.local/state/desk-fanlog).
+# Output, one line each:
+#   start=<epoch> end=<epoch> step=600 cpu_max=<°C> gpu_max=<°C>
+#   <bucket> <cpu max> <gpu max>        one 10-min bucket per line, only buckets that have samples
+# Covers the last 7 days, or less when the log is younger. Prints nothing if there is no log.
+#
+# tthermal-week summary   the week in four key=value lines instead (tthermal-desk's status file, every 10 min):
+#   week_cpu_max=<°C> week_gpu_max=<°C>
+#   week_gaming_min=<min the GPU was over 50 % busy: Gaming's trigger, without its 30 s / 2 min delays>
+#   week_fan_stops=<times a fan read 0 rpm for a minute or more: 3 samples in a row, 30 s apart>
+set -uo pipefail
+mode=${1:-chart}
+dir=${DESK_FANLOG_DIR:-$HOME/.local/state/desk-fanlog}
+step=600
+end=$(date +%s)
+since=$((end - 7 * 86400))
+
+files=()
+for i in 7 6 5 4 3 2 1 0; do
+	f=$dir/$(date -d "@$((end - i * 86400))" +%F).csv
+	[[ -r $f ]] && files+=("$f")
+done
+((${#files[@]})) || exit 0
+
+# CSV time is local ISO (2026-10-28T14:47:08); mktime takes "YYYY MM DD HH MM SS".
+awk -F, -v since="$since" -v end="$end" -v step="$step" -v mode="$mode" '
+	BEGIN { nf = split("fan1_cpu fan5_cpuopt_rear fan2_sys1_top fan3_sys2_intake", fan, " ") }   # not fan4: the chipset fan
+	FNR == 1 { for (i = 1; i <= NF; i++) col[$i] = i; next }
+	{
+		t = $col["time"]; gsub(/[-T:]/, " ", t); e = mktime(t)
+		if (e < since || e > end) next
+		b = int((e - since) / step)
+		c = $col["tdie"] + 0; g = $col["gpu_c"] + 0
+		if (("gpu_util" in col) && $col["gpu_util"] != "" && $col["gpu_util"] + 0 >= 50) busy++
+		# a stop = the same fan at 0 rpm in 3 samples in a row with no gap (the desk asleep in between breaks the run)
+		for (i = 1; i <= nf; i++) {
+			v = (fan[i] in col) ? $col[fan[i]] : ""
+			if (v == "0" && last != "" && e - last <= 45) { run[i]++; if (run[i] == 3) stops++ }
+			else run[i] = (v == "0")
+		}
+		last = e
+		if (!(b in cpu) || c > cpu[b]) cpu[b] = c
+		if (!(b in gpu) || g > gpu[b]) gpu[b] = g
+		if (first == "" || e < first) first = e
+		if (c > cmax) cmax = c
+		if (g > gmax) gmax = g
+	}
+	END {
+		if (first == "") exit
+		if (mode == "summary") {
+			printf "week_cpu_max=%d\nweek_gpu_max=%d\nweek_gaming_min=%d\nweek_fan_stops=%d\n", cmax, gmax, busy * 30 / 60, stops
+			exit
+		}
+		printf "start=%d end=%d step=%d cpu_max=%d gpu_max=%d\n", since, end, step, cmax, gmax
+		n = int((end - since) / step)
+		for (b = 0; b <= n; b++) if (b in cpu) printf "%d %d %d\n", b, cpu[b], gpu[b]
+		printf "first=%d\n", first
+	}' "${files[@]}"

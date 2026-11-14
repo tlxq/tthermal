@@ -1,0 +1,400 @@
+#!/bin/bash
+# tthermald — root side of tthermal. Keeps the CPU package under the user's max
+# temperature by steering the Intel RAPL power limits (MMIO domain).
+#
+#   burst limit (PL2)     feed-forward from headroom: cool CPU = full burst,
+#                         close to max = no burst. Recomputed every tick.
+#   sustained limit (PL1) slow integrator that settles long loads just under max.
+#
+# Input   /var/lib/tthermal/control   enabled=, max=, fan_cap=, burst=, heartbeat= (written by the plugin)
+#         /etc/tthermal.conf          tuning, key=value integers
+# Output  /run/tthermal/status        key=value snapshot for the panel
+#         journal                     status line every log_every_s, plus events
+#
+# Limits never go above the factory values read at first start after boot, and
+# are restored when the guard is released, the heartbeat goes stale, or the
+# service stops. A reboot restores them as well.
+set -uo pipefail
+
+conf=/etc/tthermal.conf
+control=/var/lib/tthermal/control
+run_dir=/run/tthermal
+status=$run_dir/status
+factory_file=$run_dir/factory
+mmio=/sys/class/powercap/intel-rapl-mmio:0
+pl1_file=$mmio/constraint_0_power_limit_uw
+pl2_file=$mmio/constraint_1_power_limit_uw
+
+interval_ms=500
+log_every_s=10
+heartbeat_timeout_s=90
+floor_w=6
+burst_from_c=5
+burst_full_c=40
+target_margin_c=2
+ki_mw=150
+# Highest burst limit the guard ever allows, in watts. Some firmware sets a
+# much higher factory burst (51 W on a 15 W chip) that only produces spikes.
+pl2_max_w=29
+# Fan (ThinkPad, needs thinkpad_acpi fan_control=1). The quiet levels 2..4
+# kick in when the smoothed temperature reaches fan_lN; below fan_l2 the fan
+# sits at fan_min_level. The loud levels only come in near max: level 5 within
+# fan_loud_margin_c of max, level 7 at max. The firmware takes the fan back
+# after fan_watchdog_s if the helper stops refreshing it.
+fan_control=1
+fan_min_level=1
+# shellcheck disable=SC2034 # read by name in fan_th (${!v})
+fan_l2=60 fan_l3=66 fan_l4=71
+fan_loud_margin_c=2
+fan_down_s=10
+fan_watchdog_s=120
+# Calm: guarding, not holding, PL1 at factory and this far under max. Then
+# the temperature is still read every tick, but the guard, the fan and the
+# status run only every 2 s. Any tick warmer than this goes back to full rate.
+calm_margin_c=15
+
+log() { echo "$*"; }
+
+# The loop runs twice a second for days, so it starts no programs: values are
+# read with `read`, the clock is $EPOCHSECONDS, and sleep is bash's loadable
+# builtin when available. Only the status file's mv runs, once every 2 s, and
+# top when a spike is logged. While calm (far under max) a tick only reads
+# the temperature; the rest runs every 2 s.
+enable -f /usr/lib/bash/sleep sleep 2>/dev/null || true
+die() { echo "<3>$*"; exit 1; }
+
+load_conf() {
+  [[ -r $conf ]] || return 0
+  local key value
+  while IFS='=' read -r key value; do
+    [[ $key =~ ^[a-z_]+$ && $value =~ ^[0-9]+$ ]] || continue
+    case $key in
+      interval_ms | log_every_s | heartbeat_timeout_s | floor_w | burst_from_c | burst_full_c | target_margin_c | ki_mw | pl2_max_w | \
+        fan_control | fan_min_level | fan_l2 | fan_l3 | fan_l4 | fan_loud_margin_c | fan_down_s | fan_watchdog_s | calm_margin_c)
+        printf -v "$key" '%d' "$value" ;;
+    esac
+  done < <(sed 's/#.*//; s/[[:space:]]//g' "$conf")
+  (( interval_ms >= 200 && interval_ms <= 5000 )) || interval_ms=500
+  (( burst_full_c > burst_from_c )) || { burst_from_c=5; burst_full_c=40; }
+  (( fan_min_level <= 7 )) || fan_min_level=1
+  (( fan_watchdog_s >= 10 && fan_watchdog_s <= 120 )) || fan_watchdog_s=120
+}
+
+[[ -w $pl1_file && -w $pl2_file ]] || die "no writable Intel RAPL MMIO limits at $mmio"
+pkg=""
+for z in /sys/class/thermal/thermal_zone*; do
+  read -r ztype <"$z/type"
+  [[ $ztype == x86_pkg_temp ]] && pkg=$z/temp && break
+done
+[[ -n $pkg ]] || die "no x86_pkg_temp sensor"
+fan_file=/proc/acpi/ibm/fan
+[[ -r $fan_file ]] || fan_file=""
+fan_writable=0
+fan_param=/sys/module/thinkpad_acpi/parameters/fan_control
+[[ -n $fan_file && -r $fan_param && $(<"$fan_param") == Y ]] && fan_writable=1
+
+mkdir -p "$run_dir"
+if [[ -r $factory_file ]]; then
+  read -r factory_pl1 factory_pl2 <"$factory_file"
+else
+  factory_pl1=$(( $(<"$pl1_file") / 1000 ))
+  factory_pl2=$(( $(<"$pl2_file") / 1000 ))
+  echo "$factory_pl1 $factory_pl2" >"$factory_file"
+fi
+
+load_conf
+log "started: factory PL1 $((factory_pl1 / 1000)) W / PL2 $((factory_pl2 / 1000)) W, burst cap ${pl2_max_w} W, fan control $( (( fan_control && fan_writable )) && echo on || echo off), tick ${interval_ms} ms"
+
+tick_s=$(printf '%d.%03d' $((interval_ms / 1000)) $((interval_ms % 1000)))
+ticks_per_log=$(( log_every_s * 1000 / interval_ms ))
+(( ticks_per_log > 0 )) || ticks_per_log=1
+
+active=0
+holding=0
+cool_ticks=0
+max_c=0
+pl1=$factory_pl1
+pl2=$factory_pl2
+written_pl1=-1
+written_pl2=-1
+t_mc=0
+tick=0
+ts_mc=0
+fan_level=auto
+fan_changed_tick=0
+fan_refresh_tick=0
+fan_step_tick=-1
+
+write_limits() {
+  if (( pl1 != written_pl1 && (pl1 - written_pl1 > 250 || written_pl1 - pl1 > 250 || pl1 == factory_pl1) )); then
+    echo $(( pl1 * 1000 )) >"$pl1_file" && written_pl1=$pl1
+  fi
+  if (( pl2 != written_pl2 && (pl2 - written_pl2 > 250 || written_pl2 - pl2 > 250 || pl2 == factory_pl2) )); then
+    echo $(( pl2 * 1000 )) >"$pl2_file" && written_pl2=$pl2
+  fi
+}
+
+# --- Fan -------------------------------------------------------------------
+fan_cmd() { echo "$1" >"$fan_file" 2>/dev/null; }
+
+fan_auto() {
+  [[ $fan_level == auto ]] && return
+  fan_cmd "level auto"
+  fan_level=auto
+}
+
+# Threshold for level $1, without forking. Loud levels count from max.
+fan_th() {
+  case $1 in
+    2 | 3 | 4) local v="fan_l$1"; th=${!v} ;;
+    5 | 6) th=$(( max_c - fan_loud_margin_c )) ;;
+    7) th=$max_c ;;
+    *) th=0 ;;
+  esac
+}
+
+# Smoothed temperature (≈10 s) picks the level, so one-second spikes don't
+# kick the fan up. Up: right away. Down: one level at a time, fan_down_s
+# apart, and only 3 °C under that level's threshold.
+fan_step() {
+  (( fan_control && fan_writable )) || return
+  # $1 = ticks since the last call, so the ~10 s smoothing holds when calm.
+  local k=${1:-1}
+  (( k > 20 )) && k=20
+  ts_mc=$(( ts_mc == 0 ? t_mc : ts_mc + (t_mc - ts_mc) * k / 20 ))
+  local ts_c=$(( ts_mc / 1000 )) want=$fan_min_level n th
+  for n in 2 3 4; do
+    fan_th "$n"
+    (( ts_c >= th )) && want=$n
+  done
+  (( ts_c >= max_c - fan_loud_margin_c )) && want=5
+  (( ts_c >= max_c )) && want=7
+  # Quiet/background: hold the temperature with power, not noise, unless it
+  # still runs 10 °C over max.
+  (( want > fan_cap && t_mc < (max_c + 10) * 1000 )) && want=$fan_cap
+  local cur=$fan_level
+  [[ $cur == auto ]] && cur=-1
+  local next=$cur
+  if (( want > cur )); then
+    next=$want
+  elif (( want < cur && (tick - fan_changed_tick) * interval_ms >= fan_down_s * 1000 )); then
+    fan_th "$cur"
+    (( ts_c < th - 3 || cur <= fan_min_level )) && next=$(( cur - 1 ))
+    (( next < want )) && next=$want
+  fi
+  if [[ $fan_level == auto ]]; then
+    fan_cmd "watchdog $fan_watchdog_s"
+    log "fan: manual control, watchdog ${fan_watchdog_s} s"
+  fi
+  if (( next != cur )); then
+    fan_cmd "level $next"
+    fan_level=$next
+    fan_changed_tick=$tick
+    fan_refresh_tick=$tick
+  elif (( (tick - fan_refresh_tick) * interval_ms >= 30000 )); then
+    fan_cmd "level $fan_level"
+    fan_refresh_tick=$tick
+  fi
+}
+
+release() {
+  local reason=$1
+  pl1=$factory_pl1
+  pl2=$factory_pl2
+  write_limits
+  fan_auto
+  ts_mc=0
+  if (( active )); then
+    log "released ($reason): factory limits restored"
+  fi
+  active=0
+  holding=0
+}
+
+shutdown() {
+  release "service stopping"
+  rm -f "$status"
+  exit 0
+}
+trap shutdown TERM INT
+trap 'load_conf; log "reloaded $conf"' HUP
+
+# Sets want_max (0 = release), why, fan_cap (highest fan level the plugin
+# allows right now: 4 while quiet/background, 7 while working) and burst
+# (0 while background: PL2 stays at PL1).
+fan_cap=7
+burst=1
+read_control() {
+  want_max=0
+  why="no control file"
+  [[ -r $control ]] || return
+  local key value enabled=0 max=0 heartbeat=0 cap=7 want_burst=1
+  while IFS='=' read -r key value; do
+    [[ $value =~ ^[0-9]+$ ]] || continue
+    case $key in
+      enabled) enabled=$value ;;
+      max) max=$value ;;
+      heartbeat) heartbeat=$value ;;
+      fan_cap) cap=$value ;;
+      burst) want_burst=$value ;;
+    esac
+  done <"$control"
+  (( cap >= 1 && cap <= 7 )) && fan_cap=$cap
+  burst=$(( want_burst != 0 ))
+  if (( enabled != 1 )); then why="turned off"; return; fi
+  if (( max < 65 || max > 95 )); then why="max $max out of range"; return; fi
+  if (( EPOCHSECONDS - heartbeat > heartbeat_timeout_s )); then why="plugin heartbeat stale"; return; fi
+  want_max=$max
+  why=""
+}
+
+step() {
+  local max_mc=$(( max_c * 1000 ))
+  local target_mc=$(( (max_c - target_margin_c) * 1000 ))
+  local floor_mw=$(( floor_w * 1000 ))
+  pl1=$(( pl1 + (target_mc - t_mc) * ki_mw / 1000 ))
+  (( t_mc >= max_mc )) && pl1=$(( pl1 - 1000 ))
+  (( pl1 < floor_mw )) && pl1=$floor_mw
+  (( pl1 > factory_pl1 )) && pl1=$factory_pl1
+  local h=$(( max_mc - t_mc ))
+  local from=$(( burst_from_c * 1000 )) full=$(( burst_full_c * 1000 ))
+  if (( h <= from )); then
+    pl2=$pl1
+  else
+    pl2=$(( pl1 + (h - from) * (factory_pl2 - pl1) / (full - from) ))
+  fi
+  (( pl2 < pl1 )) && pl2=$pl1
+  (( pl2 > factory_pl2 )) && pl2=$factory_pl2
+  (( pl2 > pl2_max_w * 1000 )) && pl2=$(( pl2_max_w * 1000 ))
+  (( pl2 < pl1 || ! burst )) && pl2=$pl1
+  write_limits
+  (( t_mc >= max_mc + 3000 )) && log_spike
+
+  # Enter within 3 °C of max (or once PL1 is pulled down). Leave only after
+  # 15 s in a row at 6 °C or more under max with PL1 back at factory: this CPU
+  # swings 15-20 °C within a second under bursty load.
+  local now_holding=$holding
+  if (( t_mc >= max_mc - 3000 || pl1 < factory_pl1 - 500 )); then
+    now_holding=1
+    cool_ticks=0
+  elif (( t_mc < max_mc - 6000 )); then
+    cool_ticks=$(( cool_ticks + 1 ))
+    (( cool_ticks * interval_ms >= 15000 )) && now_holding=0
+  else
+    cool_ticks=0
+  fi
+  if (( now_holding != holding )); then
+    if (( now_holding )); then
+      watts "$pl1"
+      log "holding: $((t_mc / 1000)) °C, max $max_c °C, PL1 $w W"
+    else
+      log "cool again: $((t_mc / 1000)) °C"
+    fi
+    holding=$now_holding
+  fi
+}
+
+# A spike 3 °C or more over max is too short to steer, so log what was busy
+# (three processes by CPU over 0.3 s, top itself left out). The one fork the
+# loop allows, at most once a minute and in the background.
+spike_logged=0
+log_spike() {
+  (( EPOCHSECONDS - spike_logged >= 60 )) || return
+  spike_logged=$EPOCHSECONDS
+  local c=$(( t_mc / 1000 ))
+  {
+    log "spike: $c °C over max $max_c °C, busiest: $(top -b -n 2 -d 0.3 -o %CPU -w 200 |
+      awk '/^top -/ { n++ } n == 2 && $1 ~ /^[0-9]+$/ && $12 != "top" && k++ < 3 { printf "%s%s %s%%", sep, $12, $9; sep = ", " }')"
+  } &
+}
+
+# Milliwatts to "12.3" in $w.
+watts() { printf -v w '%d.%d' $(( $1 / 1000 )) $(( ($1 % 1000) / 100 )); }
+
+# CPU busy % since the previous call, from /proc/stat. Sets cpu_pct.
+prev_total=0
+prev_idle=0
+cpu_pct=0
+read_cpu() {
+  local _ user nice system idle iowait irq softirq steal total idle_all
+  read -r _ user nice system idle iowait irq softirq steal _ </proc/stat
+  idle_all=$(( idle + iowait ))
+  total=$(( user + nice + system + idle_all + irq + softirq + steal ))
+  if (( prev_total > 0 && total > prev_total )); then
+    cpu_pct=$(( 100 * ((total - prev_total) - (idle_all - prev_idle)) / (total - prev_total) ))
+  fi
+  prev_total=$total
+  prev_idle=$idle_all
+}
+
+lid_file=$(compgen -G '/proc/acpi/button/lid/*/state' | head -1 || true)
+freq_files=(/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq)
+[[ -r ${freq_files[0]} ]] || freq_files=()
+
+# Average current clock in MHz, in $mhz.
+read_mhz() {
+  local f khz sum=0 n=0
+  for f in "${freq_files[@]}"; do
+    read -r khz <"$f" && sum=$(( sum + khz )) && n=$(( n + 1 ))
+  done
+  mhz=$(( n ? sum / n / 1000 : 0 ))
+}
+
+# Fan speed in RPM, in $fan.
+read_fan() {
+  local key value
+  fan=0
+  [[ -n $fan_file ]] || return
+  while read -r key value; do
+    [[ $key == speed: ]] && fan=$value && return
+  done <"$fan_file"
+}
+
+write_status() {
+  local mhz fan state=released lid=open w pl1_w pl2_w
+  read_cpu
+  [[ -n $lid_file ]] && read -r _ lid <"$lid_file"
+  read_mhz
+  read_fan
+  watts "$pl1"; pl1_w=$w
+  watts "$pl2"; pl2_w=$w
+  (( active )) && state=guarding
+  (( active && holding )) && state=holding
+  printf 'state=%s\ntemp=%d\nmax=%d\npl1=%s\npl2=%s\nmhz=%d\nfan=%d\ncpu=%d\nlid=%s\nfan_level=%s\nfactory_pl1=%s\nfactory_pl2=%s\nupdated=%d\n' \
+    "$state" $((t_mc / 1000)) "$max_c" "$pl1_w" "$pl2_w" "$mhz" "${fan:-0}" "$cpu_pct" "$lid" "$fan_level" \
+    "$factory_pl1_w" "$factory_pl2_w" "$EPOCHSECONDS" >"$status.tmp"
+  mv -f "$status.tmp" "$status"
+  if (( tick % ticks_per_log == 0 )); then
+    log "$state temp=$((t_mc / 1000)) max=$max_c pl1=$pl1_w pl2=$pl2_w mhz=$mhz fan=${fan:-0} cpu=$cpu_pct lid=$lid fan_level=$fan_level"
+  fi
+}
+
+watts "$factory_pl1"; factory_pl1_w=$w
+watts "$factory_pl2"; factory_pl2_w=$w
+status_every=$(( 2000 / interval_ms ))
+(( status_every > 0 )) || status_every=1
+
+while :; do
+  read -r t_mc <"$pkg"
+  if (( tick % 4 == 0 )); then
+    read_control
+    if (( want_max == 0 )); then
+      release "$why"
+    elif (( ! active || want_max != max_c )); then
+      (( active )) || { pl1=$factory_pl1; pl2=$factory_pl2; }
+      max_c=$want_max
+      active=1
+      log "guarding at max $max_c °C"
+    fi
+  fi
+  full=$(( tick % status_every == 0 ))
+  calm=$(( active && ! holding && pl1 >= factory_pl1 && t_mc < (max_c - calm_margin_c) * 1000 ))
+  if (( active && (full || ! calm) )); then
+    step
+    fan_step $(( tick - fan_step_tick ))
+    fan_step_tick=$tick
+  fi
+  (( full || tick % ticks_per_log == 0 )) && write_status
+  tick=$(( tick + 1 ))
+  sleep "$tick_s"
+done

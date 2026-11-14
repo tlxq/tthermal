@@ -1,0 +1,11 @@
+[Unit]
+Description=tthermal desk: picks the CoolerControl fan state (auto, gaming, full) and feeds the panel
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/Projects/tthermal/desk/bin/tthermal-desk run
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
