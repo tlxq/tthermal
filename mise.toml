@@ -5,7 +5,7 @@ shellcheck = "0.11.0"
 jq = "1.8.1"
 
 [tasks.check]
-description = "Everything pre-push runs: shellcheck, JSON, JS syntax, node tests, Omarchy manifest check where Omarchy is installed"
+description = "Everything pre-push runs: shellcheck, JSON, JS syntax, node tests, Omarchy manifest check (on a clean copy of the tracked files) where Omarchy is installed"
 run = "scripts/check.sh"
 
 [tasks.format]
