@@ -1,4 +1,7 @@
-<p align="center"><img src="docs/assets/banner.png" alt="tthermal" width="100%"></p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
+  <img alt="tthermal: Omarchy bar plugin that keeps my PCs cool and quiet." src="docs/assets/banner-light.svg" width="100%">
+</picture>
 
 My [Omarchy](https://omarchy.org) bar plugin for keeping my two computers cool and quiet without picking power
 profiles by hand: a ThinkPad T14s and an AMD/NVIDIA desktop. On the laptop it takes the battery icon's place and
