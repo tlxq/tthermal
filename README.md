@@ -1,8 +1,12 @@
 <p align="center"><img src="docs/assets/banner.png" alt="tthermal" width="100%"></p>
 
-An [Omarchy](https://omarchy.org) bar plugin for people who want their computer cool and quiet without picking
-power profiles by hand. On an Intel laptop it takes the battery icon's place and keeps the CPU under one
-temperature you choose. On a desktop it shows CPU and GPU temperature and switches the fan curves.
+My [Omarchy](https://omarchy.org) bar plugin for keeping my two computers cool and quiet without picking power
+profiles by hand: a ThinkPad T14s and an AMD/NVIDIA desktop. On the laptop it takes the battery icon's place and
+keeps the CPU under one temperature I choose. On the desktop it shows CPU and GPU temperature and switches the fan
+curves.
+
+It's built for that hardware, not as a general tool. Read it for the idea, or use it as a starting point for your
+own machine.
 
 Checks run on my own PC before every merge: `mise run check`.
 
@@ -13,6 +17,19 @@ Checks run on my own PC before every merge: `mise run check`.
 </p>
 
 <!-- Desktop panel screenshot goes here: docs/assets/desk-panel.png. Not taken yet. -->
+
+## Built for my machines
+
+| Part | Needs |
+|---|---|
+| Laptop power limits | An Intel CPU with RAPL. Tuned on a ThinkPad T14s Gen 1 (i7-10610U). |
+| Laptop fan | A ThinkPad (`thinkpad_acpi`) |
+| Desktop temperatures | An AMD CPU with zenpower, an NVIDIA GPU, and a Gigabyte board (it8688 sensor) |
+| Desktop fans | CoolerControl, with six fan profiles you make yourself |
+| Desktop week chart | My own fan logger, which isn't in this repo |
+
+On other hardware, start with the sensor and fan names at the top of `desk/bin/tthermal-desk`, and the limits in
+`helper/tthermal.conf`.
 
 ## Why it exists
 
