@@ -56,7 +56,7 @@ Panel {
     if (!serviceReady) return "The fan helper isn't running"
     if (biosControl) return "CoolerControl is off · the BIOS runs the fans"
     if (state === "full") return "All fans at 100 % · Auto again in " + fullMinutes + " min"
-    if (state === "gaming") return "GPU busy · case fans at least 45 %"
+    if (state === "gaming") return (st.held === "1" ? "Game mode on" : "GPU busy") + " · case fans at least 45 %"
     return hot >= 60 ? "Fans follow the heat" : "Idle · cool and quiet"
   }
   // Short hover text: the sensor the bar shows comes first.
