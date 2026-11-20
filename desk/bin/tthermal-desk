@@ -4,14 +4,17 @@
 #
 #   auto     the normal curves (cooler + rear follow the CPU, top + intake the hotter of CPU/GPU)
 #   gaming   GPU over 50 % busy for 30 s: case fans get a floor (top 45 %, intake 55 %);
-#            back to auto after 2 min below 50 %
+#            back to auto after 2 min below 50 %; held on by `gaming` (a game mode elsewhere) until `auto`
 #   full     every managed fan at 100 %, back to auto after 30 min (or when asked)
 #
 # Usage   tthermal-desk run            the service loop (tthermal-desk.service)
 #         tthermal-desk full | auto    ask the running service to switch (the panel buttons)
+#         tthermal-desk gaming         hold the gaming curves until `auto` (for a game mode script)
+#                                      full, auto and gaming exit 1 when the service isn't running
 #
 # Input   ~/.config/ttdevs/coolercontrol.token   CoolerControl API token with write access
 #         $XDG_RUNTIME_DIR/tthermal/request      one word written by `full` / `auto`
+#         $XDG_RUNTIME_DIR/tthermal/hold         exists while `gaming` holds (kept over a service restart)
 # Output  $XDG_RUNTIME_DIR/tthermal/status       key=value snapshot for the panel (and any other reader), every 2 s;
 #                                                gpu_fan in %, the fans in rpm, week_* from `tthermal-week summary` every 10 min
 #         journal                                state changes and fan alerts
@@ -24,6 +27,7 @@ set -uo pipefail
 run_dir=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/tthermal
 status=$run_dir/status
 request=$run_dir/request
+hold=$run_dir/hold
 token_file=$HOME/.config/ttdevs/coolercontrol.token
 api_url=https://127.0.0.1:11987
 cc_device=it8688   # the CoolerControl device that drives the fan headers, by name
@@ -42,13 +46,23 @@ fans=(fan1 fan5 fan2 fan3)
 declare -A fan_name=([fan1]=Cooler [fan5]=Rear [fan2]=Top [fan3]=Intake)
 
 case ${1:-} in
-	full | auto)
+	full | auto | gaming)
 		mkdir -p "$run_dir"
-		echo "$1" >"$request"
+		case $1 in
+			gaming) : >"$hold" ;;
+			auto) rm -f "$hold"; echo auto >"$request" ;;
+			full) echo full >"$request" ;;
+		esac
+		# The request waits for the service either way; say so when it isn't running.
+		updated=$(sed -n 's/^updated=//p' "$status" 2>/dev/null)
+		if ((${updated:-0} < $(date +%s) - 10)); then
+			echo "tthermal-desk: the fan service isn't running; $1 starts when it does" >&2
+			exit 1
+		fi
 		exit 0
 		;;
 	run) ;;
-	*) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+	*) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
 
 hwmon_dir() {
@@ -127,6 +141,9 @@ while :; do
 		esac
 	fi
 
+	held=0
+	[[ -e $hold ]] && held=1
+
 	# GPU busy -> gaming, with hysteresis
 	if ((gpu_util >= gaming_util)); then
 		((busy_since == 0)) && busy_since=$now
@@ -139,10 +156,13 @@ while :; do
 		state=auto
 		echo "full speed ended after $((full_for_s / 60)) min"
 	fi
-	if [[ $state == auto ]] && ((busy_since > 0 && now - busy_since >= gaming_after_s)); then
+	if [[ $state == auto ]] && ((held)); then
+		state=gaming
+		echo "gaming: held until auto"
+	elif [[ $state == auto ]] && ((busy_since > 0 && now - busy_since >= gaming_after_s)); then
 		state=gaming
 		echo "gaming: GPU ${gpu_util} % busy for ${gaming_after_s} s"
-	elif [[ $state == gaming ]] && ((calm_since > 0 && now - calm_since >= gaming_until_s)); then
+	elif [[ $state == gaming ]] && ((!held && calm_since > 0 && now - calm_since >= gaming_until_s)); then
 		state=auto
 		echo "gaming over"
 	fi
@@ -194,6 +214,7 @@ while :; do
 		echo "hot=$hot"
 		echo "hot_src=$hot_src"
 		echo "state=$state"
+		echo "held=$held"
 		echo "full_left=$full_left"
 		echo "control=$control"
 		echo "alert=$alert"

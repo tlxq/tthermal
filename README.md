@@ -118,7 +118,8 @@ change the sensor and fan names at the top of `desk/bin/tthermal-desk`.
 3. Run `~/Projects/tthermal/desk/install.sh`. It links `desk/` as the plugin and starts the user service.
 
 The bar shows the hotter of CPU and GPU. Gaming turns on by itself when the GPU has been over 50 % busy for 30 s,
-and Full speed goes back to Auto after 30 minutes. The week chart reads CSV logs from
+and Full speed goes back to Auto after 30 minutes. A game mode script can hold Gaming with
+`desk/bin/tthermal-desk gaming` until `desk/bin/tthermal-desk auto` (or the Auto button). The week chart reads CSV logs from
 `~/.local/state/desk-fanlog/`, one file per day. The logger isn't part of this repo; without it the chart stays
 empty. Logs: `journalctl --user -u tthermal-desk`. Remove: `desk/uninstall.sh`.
 
